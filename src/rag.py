@@ -1,19 +1,32 @@
 import json
 from time import time
-from groq import Groq
-from dotenv import load_dotenv
+try:
+    from groq import Groq  # type: ignore
+except Exception:  # pragma: no cover
+    Groq = None
+
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:  # pragma: no cover
+    load_dotenv = None
 import os
 import ingest
 import logging
+from typing import Optional
+
+from query_parser import parse_query
+from retriever import MultiRetriever
+from reranker import Reranker
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+if load_dotenv is not None:
+    load_dotenv()
 
 groq_api_key = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=groq_api_key)
+client = Groq(api_key=groq_api_key) if (Groq is not None and groq_api_key) else None
 
 # Load the search index
 try:
@@ -25,38 +38,47 @@ except Exception as e:
 if index is None:
     raise ValueError("Search index could not be loaded")
 
+multi_retriever = MultiRetriever(index)
+
+ENABLE_QUERY_PARSER_LLM = os.getenv("ENABLE_QUERY_PARSER_LLM", "1") == "1"
+ENABLE_RERANKER_LLM = os.getenv("ENABLE_RERANKER_LLM", "0") == "1"
+
+reranker = Reranker(llm_score_json=None)  # configured later after llm() exists
+
+
 def search(query):
+    """
+    Backwards-compatible single-route retrieval (legacy).
+    Prefer retrieve_context() for multi-route + rerank + filtering.
+    """
     try:
-        results = index.search(
-            query=query,
-            num_results=10
-        )
-        return results
+        return index.search(query=query, num_results=10)
     except Exception as e:
         logger.error(f"Error in search function: {e}")
         return []
 
 prompt_template = """ 
-You are an expert mental health assistant specialized in providing detailed and accurate answers based on the given context. Answer the QUESTION based on the CONTEXT from our mental health database. Use only the facts from the CONTEXT when answering the QUESTION.
+You are a careful mental health assistant. Answer the QUESTION using ONLY the facts in the CONTEXT.
 
-Here is the context:
+Hard rules:
+- If the CONTEXT does not contain enough information to answer, say you don't have enough information in the database and ask one clarifying question.
+- Do NOT invent facts, sources, or medical claims not present in the CONTEXT.
+- When you use a fact, cite the source_id(s) in plain text like (source_id: 123).
+- If the query indicates immediate danger (self-harm/suicide/overdose), prioritize safety guidance: encourage contacting local emergency services or a trusted professional immediately.
 
-Context: {context}
+CONTEXT:
+{context}
 
-Please answer the following question based on the provided context:
+QUESTION:
+{question}
 
-Question: {question}
-
-Provide a detailed and informative response. Ensure that your answer is clear, concise, and directly addresses the question while being relevant to the context provided.
-
-Your response should be in plain text and should not include any code blocks or extra formatting.
-
-Answer:
+Answer (plain text):
 """.strip()
 
 entry_template = """ 
-questions={Questions}
-answers={Answers}
+source_id={Question_ID}
+question={Questions}
+answer={Answers}
 """.strip()
 
 def build_prompt(query, search_results):
@@ -67,6 +89,10 @@ def build_prompt(query, search_results):
     return prompt
 
 def llm(prompt, model="mixtral-8x7b-32768"):
+    if client is None:
+        raise RuntimeError(
+            "Groq client is not configured. Install 'groq' and set GROQ_API_KEY to enable LLM calls."
+        )
     start_time = time()
     response = client.chat.completions.create(
         model=model, messages=[{"role": "user", "content": prompt}]
@@ -84,6 +110,73 @@ def llm(prompt, model="mixtral-8x7b-32768"):
 
     return answer, token_stats, response_time    
 
+
+def _llm_text(prompt: str, model: str) -> str:
+    text, _, _ = llm(prompt, model=model)
+    return text
+
+
+def retrieve_context(query: str, model: str = "mixtral-8x7b-32768") -> tuple[list[dict], dict]:
+    """
+    Industrial-ish retrieval pipeline:
+      Query Understanding -> Multi-retrieval -> Rerank/Filter -> Top-k contexts
+    Returns (docs_for_prompt, retrieval_debug)
+    """
+    # Configure optional LLM helpers (lazy, keeps module deps minimal)
+    qp_llm = None
+    if ENABLE_QUERY_PARSER_LLM and groq_api_key:
+        qp_llm = lambda p: _llm_text(p, model=os.getenv("QUERY_PARSER_MODEL", "gemma2-9b-it"))
+
+    rr_llm = None
+    if ENABLE_RERANKER_LLM and groq_api_key:
+        rr_llm = lambda p: _llm_text(p, model=os.getenv("RERANKER_MODEL", "gemma2-9b-it"))
+
+    global reranker
+    reranker = Reranker(llm_score_json=rr_llm)
+
+    parsed = parse_query(query, llm_json=qp_llm).to_json()
+
+    per_route_k = int(os.getenv("PER_ROUTE_K", "25"))
+    top_k = int(os.getenv("CONTEXT_TOP_K", "8"))
+    boost_dict = {"Questions": 1.2, "Answers": 1.0}
+
+    candidates = multi_retriever.retrieve(
+        query=query,
+        parsed_query=parsed,
+        per_route_k=per_route_k,
+        boost_dict=boost_dict,
+    )
+
+    reranked, rr_debug = reranker.rerank_and_filter(
+        candidates=candidates,
+        query=query,
+        parsed_query=parsed,
+        top_k=top_k,
+    )
+
+    docs = [r.doc for r in reranked]
+
+    retrieval_debug = {
+        "parsed_query": parsed,
+        "per_route_k": per_route_k,
+        "context_top_k": top_k,
+        "boost_dict": boost_dict,
+        "rerank_debug": rr_debug,
+        "top_candidates": [
+            {
+                "doc_id": r.doc_id,
+                "source_id": r.doc.get("Question_ID"),
+                "final_score": r.final_score,
+                "keep": r.keep,
+                "reasons": r.reasons,
+            }
+            for r in reranked[: min(len(reranked), 8)]
+        ],
+    }
+
+    return docs, retrieval_debug
+
+
 def evaluate_relevance(question, answer, model='mixtral-8x7b-32768'):
     eval_prompt = f"""
 You are an expert evaluator for a Retrieval-Augmented Generation (RAG) system.
@@ -96,10 +189,12 @@ Question: {question}
 Answer: {answer}
 
 Please analyze the content and context of the generated answer in relation to the question
-and provide your evaluation in parsable JSON without using code blocks:
+and provide your evaluation as STRICTLY valid JSON (no code blocks, no extra text):
 
-"Relevance": "NON_RELEVANT" | "PARTLY_RELEVANT" | "RELEVANT",
-"Explanation": "[Provide a brief explanation for your evaluation]"
+{{
+  "Relevance": "NON_RELEVANT" | "PARTLY_RELEVANT" | "RELEVANT",
+  "Explanation": "brief explanation"
+}}
 """.strip()
 
     evaluation, tokens, _ = llm(eval_prompt, model)
@@ -119,7 +214,7 @@ and provide your evaluation in parsable JSON without using code blocks:
 def rag(query, model="mixtral-8x7b-32768"):
     t0 = time()
 
-    search_results = search(query)
+    search_results, retrieval_debug = retrieve_context(query, model=model)
     prompt = build_prompt(query, search_results)
     answer, tokens, response_time = llm(prompt, model=model)
 
@@ -134,6 +229,7 @@ def rag(query, model="mixtral-8x7b-32768"):
         'response_time': response_time,
         'relevance': relevance,
         'relevance_explanation': explanation,
+        'retrieval_debug': retrieval_debug,
         'prompt_tokens': tokens['prompt_tokens'],
         'completion_tokens': tokens['completion_tokens'],
         'total_tokens': tokens['total_tokens'],
