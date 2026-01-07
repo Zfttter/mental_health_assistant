@@ -59,7 +59,13 @@ def main():
     # Model selection
     model_choice = st.selectbox(
         "Select a model:",
-        ["gemma2-9b-it", "llama-3.1-70b-versatile", "llama3-70b-8192", "mixtral-8x7b-32768"],
+        [
+            # NOTE: Keep this list aligned with Groq supported models.
+            "llama-3.1-8b-instant",
+            "llama-3.1-70b-versatile",
+            "llama3-70b-8192",
+            "mixtral-8x7b-32768",
+        ],
     )
     print_log(f"User selected model: {model_choice}")
 

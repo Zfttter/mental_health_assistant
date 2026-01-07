@@ -125,11 +125,11 @@ def retrieve_context(query: str, model: str = "mixtral-8x7b-32768") -> tuple[lis
     # Configure optional LLM helpers (lazy, keeps module deps minimal)
     qp_llm = None
     if ENABLE_QUERY_PARSER_LLM and groq_api_key:
-        qp_llm = lambda p: _llm_text(p, model=os.getenv("QUERY_PARSER_MODEL", "gemma2-9b-it"))
+        qp_llm = lambda p: _llm_text(p, model=os.getenv("QUERY_PARSER_MODEL", "llama-3.1-8b-instant"))
 
     rr_llm = None
     if ENABLE_RERANKER_LLM and groq_api_key:
-        rr_llm = lambda p: _llm_text(p, model=os.getenv("RERANKER_MODEL", "gemma2-9b-it"))
+        rr_llm = lambda p: _llm_text(p, model=os.getenv("RERANKER_MODEL", "llama-3.1-8b-instant"))
 
     global reranker
     reranker = Reranker(llm_score_json=rr_llm)
