@@ -94,3 +94,45 @@ class Index:
         top_docs = [self.docs[i] for i in top_indices if scores[i] > 0]
 
         return top_docs
+
+    def search_with_scores(self, query, filter_dict={}, boost_dict={}, num_results=10):
+        """
+        Same as search(), but returns (doc, score, per_field_scores) for explainability.
+
+        Returns:
+            list of dict: Each item contains:
+              - doc: original document dict
+              - score: final aggregated similarity score (after boosts/filters)
+              - field_scores: dict[field] -> cosine similarity for that field (before boosts)
+        """
+        query_vecs = {field: self.vectorizers[field].transform([query]) for field in self.text_fields}
+        scores = np.zeros(len(self.docs))
+        per_field = {field: np.zeros(len(self.docs)) for field in self.text_fields}
+
+        for field, query_vec in query_vecs.items():
+            sim = cosine_similarity(query_vec, self.text_matrices[field]).flatten()
+            per_field[field] = sim
+            boost = boost_dict.get(field, 1)
+            scores += sim * boost
+
+        # Apply keyword filters
+        for field, value in filter_dict.items():
+            if field in self.keyword_fields:
+                mask = self.keyword_df[field] == value
+                scores = scores * mask.to_numpy()
+
+        top_indices = np.argpartition(scores, -num_results)[-num_results:]
+        top_indices = top_indices[np.argsort(-scores[top_indices])]
+
+        results = []
+        for i in top_indices:
+            if scores[i] <= 0:
+                continue
+            results.append(
+                {
+                    "doc": self.docs[i],
+                    "score": float(scores[i]),
+                    "field_scores": {field: float(per_field[field][i]) for field in self.text_fields},
+                }
+            )
+        return results

@@ -9,7 +9,10 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-RUN_TIMEZONE_CHECK = os.getenv('RUN_TIMEZONE_CHECK', '1') == '1'
+# IMPORTANT:
+# - In containers, the DB is often not ready at import time.
+# - Keep this OFF by default to avoid startup crashes.
+RUN_TIMEZONE_CHECK = os.getenv('RUN_TIMEZONE_CHECK', '0') == '1'
 
 TZ_INFO = os.getenv("TZ", "Europe/Berlin")
 tz = ZoneInfo(TZ_INFO)
@@ -17,11 +20,21 @@ tz = ZoneInfo(TZ_INFO)
 
 def get_db_connection():
     try:
+        # Support both naming conventions:
+        # - POSTGRES_* (used by many examples in this repo)
+        # - DB_* (used by docker-compose.yaml)
+        host = os.getenv("POSTGRES_HOST") or os.getenv("DB_HOST") or "localhost"
+        database = os.getenv("POSTGRES_DB") or os.getenv("DB_NAME") or "mental_health"
+        user = os.getenv("POSTGRES_USER") or os.getenv("DB_USER") or "newton"
+        password = os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD") or "Admin"
+        port = os.getenv("POSTGRES_PORT") or os.getenv("DB_PORT")
+
         conn = psycopg2.connect(
-            host=os.getenv("POSTGRES_HOST", "localhost"),
-            database=os.getenv("POSTGRES_DB", "mental_health"),
-            user=os.getenv("POSTGRES_USER", "newton"),
-            password=os.getenv("POSTGRES_PASSWORD", "Admin"),
+            host=host,
+            database=database,
+            user=user,
+            password=password,
+            port=port,
         )
         logger.info("Successfully connected to the database")
         return conn
