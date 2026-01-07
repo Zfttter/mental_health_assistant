@@ -3,6 +3,7 @@ import time
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import os
 
 import rag
 from db import (
@@ -23,6 +24,36 @@ tz = ZoneInfo("Europe/Berlin")
 
 def print_log(message):
     print(message, flush=True)
+
+def _get_groq_available_models() -> list[str]:
+    """
+    Fetch available Groq models for the current API key.
+    Falls back to a safe static list if Groq is unavailable.
+    """
+    api_key = os.getenv("GROQ_API_KEY", "")
+    if not api_key:
+        return ["llama-3.1-8b-instant"]
+
+    try:
+        from groq import Groq  # type: ignore
+
+        c = Groq(api_key=api_key)
+        ids = [m.id for m in c.models.list().data]
+        # Filter out non-chat / utility models to reduce confusion.
+        deny_prefix = ("whisper", "meta-llama/llama-guard", "meta-llama/llama-prompt-guard", "openai/gpt-oss-safeguard")
+        ids = [m for m in ids if not m.startswith(deny_prefix)]
+        # Prefer a compact, high-signal ordering if present
+        preferred = [
+            "llama-3.1-8b-instant",
+            "llama-3.3-70b-versatile",
+            "groq/compound",
+            "groq/compound-mini",
+        ]
+        ordered = [m for m in preferred if m in ids]
+        ordered += [m for m in ids if m not in ordered]
+        return ordered or ["llama-3.1-8b-instant"]
+    except Exception:
+        return ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "groq/compound"]
 
 def main():
     print_log("Starting the Mental Health Assistant application")
@@ -57,14 +88,10 @@ def main():
         st.session_state.clear_chat = False
 
     # Model selection
+    available_models = _get_groq_available_models()
     model_choice = st.selectbox(
         "Select a model:",
-        [
-            # NOTE: Keep this list aligned with Groq supported models.
-            "llama-3.1-8b-instant",
-            "llama3-70b-8192",
-            "mixtral-8x7b-32768",
-        ],
+        available_models,
     )
     print_log(f"User selected model: {model_choice}")
 
