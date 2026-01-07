@@ -62,7 +62,6 @@ def main():
         [
             # NOTE: Keep this list aligned with Groq supported models.
             "llama-3.1-8b-instant",
-            "llama-3.1-70b-versatile",
             "llama3-70b-8192",
             "mixtral-8x7b-32768",
         ],

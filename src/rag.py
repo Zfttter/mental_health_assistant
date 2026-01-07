@@ -4,6 +4,10 @@ try:
     from groq import Groq  # type: ignore
 except Exception:  # pragma: no cover
     Groq = None
+try:
+    from groq import BadRequestError  # type: ignore
+except Exception:  # pragma: no cover
+    BadRequestError = None
 
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -94,9 +98,25 @@ def llm(prompt, model="mixtral-8x7b-32768"):
             "Groq client is not configured. Install 'groq' and set GROQ_API_KEY to enable LLM calls."
         )
     start_time = time()
-    response = client.chat.completions.create(
-        model=model, messages=[{"role": "user", "content": prompt}]
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model, messages=[{"role": "user", "content": prompt}]
+        )
+    except Exception as e:
+        # Groq occasionally decommissions models; retry once with a safe fallback.
+        msg = str(e)
+        if ("decommissioned" in msg.lower()) or ("model_decommissioned" in msg.lower()):
+            fallback_model = os.getenv("FALLBACK_GROQ_MODEL", "llama-3.1-8b-instant")
+            if model != fallback_model:
+                logger.warning("Model '%s' decommissioned; retrying with '%s'", model, fallback_model)
+                response = client.chat.completions.create(
+                    model=fallback_model, messages=[{"role": "user", "content": prompt}]
+                )
+                model = fallback_model
+            else:
+                raise
+        else:
+            raise
 
     answer = response.choices[0].message.content
 
